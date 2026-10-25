@@ -16,7 +16,7 @@ pub(crate) fn dictionary_problem(lang: &str, unreadable: &Option<(std::path::Pat
         )),
         (None, Some(name)) => Some(crate::i18n::fmt(
             tl!(
-                "No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations."
+                "No spelling dictionary for {language} is installed, so it isn't checked. Write looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations."
             ),
             &[("language", lang), ("name", name)],
         )),

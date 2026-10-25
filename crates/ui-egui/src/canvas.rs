@@ -1519,6 +1519,32 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         } else {
             balloons(app, ui, &painter, &rects, &layout, geo.scale, view_rect);
         }
+        // OneOS live editing: the other people in the room, each a coloured selection and caret with their name.
+        for rc in &app.session.remote_cursors {
+            let colour = Color32::from_rgb(rc.color[0], rc.color[1], rc.color[2]);
+            if rc.anchor != rc.focus {
+                let (a, b) = if rc.anchor <= rc.focus { (&rc.anchor, &rc.focus) } else { (&rc.focus, &rc.anchor) };
+                for (pi, r) in layout.selection_rects(&app.session.doc, a, b, app.session.page_hint) {
+                    if let Some(pr) = rects.get(pi) {
+                        let scale = layout.pages.get(pi).map_or(geo.scale, |page| page_screen_scale(*pr, page, geo.scale));
+                        let hr = Rect::from_min_size(pos2(pr.min.x + r.x * scale, pr.min.y + r.y * scale), vec2(r.w * scale, r.h * scale));
+                        painter.rect_filled(hr, 0.0, colour.gamma_multiply(0.22));
+                    }
+                }
+            }
+            if let Some(c) = layout.caret_on(&rc.focus, app.session.page_hint)
+                && let Some(pr) = rects.get(c.page)
+            {
+                let scale = layout.pages.get(c.page).map_or(geo.scale, |page| page_screen_scale(*pr, page, geo.scale));
+                let x = pr.min.x + c.x * scale;
+                let (y0, y1) = (pr.min.y + c.top * scale, pr.min.y + (c.top + c.height) * scale);
+                painter.line_segment([pos2(x, y0), pos2(x, y1)], Stroke::new(2.0, colour));
+                let galley = painter.layout_no_wrap(rc.name.clone(), regular(10.0), Color32::WHITE);
+                let flag = Rect::from_min_size(pos2(x, y0 - galley.size().y - 3.0), galley.size() + vec2(6.0, 2.0));
+                painter.rect_filled(flag, 2.0, colour);
+                painter.galley(flag.min + vec2(3.0, 1.0), galley, Color32::WHITE);
+            }
+        }
         // Find › Reading Highlight. Its places are the document's, not the preview's.
         let marks: Vec<(Pos, Pos)> =
             if preview_sel(app).is_some() { Vec::new() } else { app.session.find_highlights().iter().take(5000).cloned().collect() };

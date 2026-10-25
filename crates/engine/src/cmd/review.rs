@@ -203,7 +203,10 @@ fn reply(s: &mut Session, v: &Value) -> CmdResult {
 }
 
 /// An id no comment has: one past the largest, or the lowest free one once a file used `u32::MAX`.
-fn comment_id(s: &Session) -> Result<u32, CmdError> {
+fn comment_id(s: &mut Session) -> Result<u32, CmdError> {
+    if let Some(id) = s.next_live_comment_id() {
+        return Ok(id);
+    }
     let ids = &s.doc.comments;
     wordcraft_doc::free_id(ids.keys().next_back().copied(), ids.keys().copied(), 0).ok_or_else(|| CmdError::Failed("no free comment id".into()))
 }

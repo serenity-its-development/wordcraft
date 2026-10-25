@@ -15,6 +15,7 @@
 //! (picture, field, note reference...) is the U+FFFC character carrying an `obj` mark whose value is the object's JSON,
 //! so it travels with its character as others type around it.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use wordcraft_doc::para::{OBJ, next_rev};
 use wordcraft_doc::props::{CharProps, ParaProps};
 use wordcraft_doc::{Block, InlineObject, Paragraph, Run, SectionProps, Table};
 
+use crate::media::{MediaIndex, hash_of_shared, shared_key};
 use crate::mirror::{Chars, Marks, Mirror, spans_to_chars};
 use crate::ShimError;
 
@@ -49,8 +51,73 @@ fn bounded(what: &str, v: Value) -> Result<Value, ShimError> {
     if n > MAX_VALUE { Err(too_large(what, n)) } else { Ok(v) }
 }
 
+/// What the translation of picture references needs: the window's pictures, and a place to note the shared addresses it has no
+/// bytes for (they are asked of the host).
+pub struct Shared<'a> {
+    pub media: &'a MediaIndex,
+    pub wanted: RefCell<BTreeSet<String>>,
+}
+
+impl<'a> Shared<'a> {
+    #[must_use]
+    pub fn new(media: &'a MediaIndex) -> Self {
+        Shared { media, wanted: RefCell::new(BTreeSet::new()) }
+    }
+}
+
+/// Visit every picture (`{"type": "image", "media": key}`) anywhere in a JSON value and let `f` replace its key.
+fn walk_images(v: &mut Value, f: &mut dyn FnMut(&str) -> Option<String>) {
+    match v {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("image")
+                && let Some(Value::String(key)) = map.get("media")
+                && let Some(new) = f(key)
+            {
+                map.insert("media".to_owned(), Value::String(new));
+            }
+            for child in map.values_mut() {
+                walk_images(child, f);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|c| walk_images(c, f)),
+        _ => {}
+    }
+}
+
+/// The shared form of a value leaving this window: each picture's key becomes its content address (`cas-<hash>.<ext>`).
+fn pictures_out(v: &mut Value, cx: &Shared<'_>) {
+    walk_images(v, &mut |key| {
+        if hash_of_shared(key).is_some() {
+            return None;
+        }
+        cx.media.hash_of_key(key).map(|h| shared_key(h, key))
+    });
+}
+
+/// A value arriving: each content address becomes the key this window holds those bytes under, or stays an address (and is
+/// noted as wanted) until the bytes arrive.
+fn pictures_in(v: &mut Value, cx: &Shared<'_>) {
+    walk_images(v, &mut |key| {
+        let hash = hash_of_shared(key)?;
+        match cx.media.key_of_hash(hash) {
+            Some(local) => Some(local.to_owned()),
+            None => {
+                cx.wanted.borrow_mut().insert(hash.to_owned());
+                None
+            }
+        }
+    });
+}
+
+/// A table as the shared tree holds it (pictures by content address).
+fn table_out(t: &Table, cx: &Shared<'_>) -> Result<Value, ShimError> {
+    let mut v = json_of(t)?;
+    pictures_out(&mut v, cx);
+    Ok(v)
+}
+
 /// Per-character marks of a paragraph: its runs' CharProps fields, and the objects at their U+FFFC.
-pub fn char_marks(p: &Paragraph) -> Result<Vec<Marks>, ShimError> {
+pub fn char_marks(p: &Paragraph, cx: &Shared<'_>) -> Result<Vec<Marks>, ShimError> {
     let mut out = Vec::with_capacity(p.text.chars().count());
     let mut runs = p.runs.iter();
     let mut run = runs.next();
@@ -74,7 +141,9 @@ pub fn char_marks(p: &Paragraph) -> Result<Vec<Marks>, ShimError> {
         let mut marks = props.clone();
         if c == OBJ {
             if let Some(o) = p.objects.get(object) {
-                marks.insert(OBJECT.to_owned(), bounded("an inline object", json_of(o)?)?);
+                let mut shared = json_of(o)?;
+                pictures_out(&mut shared, cx);
+                marks.insert(OBJECT.to_owned(), bounded("an inline object", shared)?);
             }
             object += 1;
         }
@@ -102,7 +171,7 @@ fn char_props(marks: &Marks) -> Result<CharProps, ShimError> {
 }
 
 /// The paragraph a block node of the shared tree holds.
-pub fn para_from_node(node: &Value) -> Result<Paragraph, ShimError> {
+pub fn para_from_node(node: &Value, cx: &Shared<'_>) -> Result<Paragraph, ShimError> {
     let chars: Chars = node.get("text").and_then(|t| t.get("$text")).map(spans_to_chars).unwrap_or_default();
     let mut text = String::new();
     let mut runs: Vec<Run> = Vec::new();
@@ -112,7 +181,9 @@ pub fn para_from_node(node: &Value) -> Result<Paragraph, ShimError> {
         if *c == OBJ {
             // An object character whose object did not arrive is no character at all.
             let Some(o) = marks.get(OBJECT) else { continue };
-            objects.push(serde_json::from_value(o.clone()).map_err(|e| ShimError::Model(format!("inline object: {e}")))?);
+            let mut local = o.clone();
+            pictures_in(&mut local, cx);
+            objects.push(serde_json::from_value(local).map_err(|e| ShimError::Model(format!("inline object: {e}")))?);
         }
         let fields: Marks = marks.iter().filter(|(k, _)| k.starts_with(FIELD)).map(|(k, v)| (k.clone(), v.clone())).collect();
         match (&last, runs.last_mut()) {
@@ -141,20 +212,29 @@ pub fn para_from_node(node: &Value) -> Result<Paragraph, ShimError> {
 }
 
 /// The block a node of the shared tree holds: a table when it has `v`, else a paragraph.
-pub fn block_from_node(node: &Value) -> Result<Block, ShimError> {
+pub fn block_from_node(node: &Value, cx: &Shared<'_>) -> Result<Block, ShimError> {
     match node.get("v") {
         Some(v) => {
-            let table: Table = serde_json::from_value(v.get("$value").unwrap_or(v).clone()).map_err(|e| ShimError::Model(format!("table: {e}")))?;
+            let mut local = v.get("$value").unwrap_or(v).clone();
+            pictures_in(&mut local, cx);
+            let table: Table = serde_json::from_value(local).map_err(|e| ShimError::Model(format!("table: {e}")))?;
             Ok(Block::Table(table))
         }
-        None => Ok(Block::Para(para_from_node(node)?)),
+        None => Ok(Block::Para(para_from_node(node, cx)?)),
     }
 }
 
 /// The ids and blocks of the mirror's body, reusing `reuse(id)` when the shared block is the same content.
-pub fn body_of(mirror: &Mirror, mut reuse: impl FnMut(&str, &Value) -> Option<Arc<Block>>) -> Result<(Vec<String>, Vec<Arc<Block>>), ShimError> {
+pub fn body_of(
+    mirror: &Mirror,
+    list: &[&str],
+    cx: &Shared<'_>,
+    mut reuse: impl FnMut(&str, &Value) -> Option<Arc<Block>>,
+) -> Result<(Vec<String>, Vec<Arc<Block>>), ShimError> {
+    let mut at: Vec<&str> = list.to_vec();
+    at.push("$list");
     let ids: Vec<String> = mirror
-        .get(&["body", "$list"])
+        .get(&at)
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
         .unwrap_or_default();
@@ -165,7 +245,7 @@ pub fn body_of(mirror: &Mirror, mut reuse: impl FnMut(&str, &Value) -> Option<Ar
         let Some(node) = mirror.get(&["blocks", &id]) else { continue };
         let block = match reuse(&id, node) {
             Some(b) => b,
-            None => Arc::new(block_from_node(node)?),
+            None => Arc::new(block_from_node(node, cx)?),
         };
         kept.push(id);
         blocks.push(block);
@@ -211,10 +291,10 @@ pub fn mark_ops(path: &[&str], from: &[Marks], to: &[Marks]) -> Vec<Value> {
 }
 
 /// The ops that make block `id` (a new map beneath `blocks`) and list it at body index `at`.
-pub fn create_ops(id: &str, block: &Block, at: usize, out: &mut Vec<Value>) -> Result<(), ShimError> {
+pub fn create_ops(list: &[&str], id: &str, block: &Block, at: usize, out: &mut Vec<Value>, cx: &Shared<'_>) -> Result<(), ShimError> {
     out.push(json!({"op": "new", "path": ["blocks"], "key": id, "kind": "map"}));
     match block {
-        Block::Table(t) => out.push(set(&["blocks", id], "v", bounded("a table", json_of(t)?)?)),
+        Block::Table(t) => out.push(set(&["blocks", id], "v", bounded("a table", table_out(t, cx)?)?)),
         Block::Para(p) => {
             let chars: Vec<char> = p.text.chars().collect();
             let mut chunks = text_chunks(&chars);
@@ -228,7 +308,7 @@ pub fn create_ops(id: &str, block: &Block, at: usize, out: &mut Vec<Value>) -> R
                 out.push(json!({"op": "text.insert", "path": ["blocks", id, "text"], "at": at_char, "text": more}));
                 at_char += n;
             }
-            let marks = char_marks(p)?;
+            let marks = char_marks(p, cx)?;
             let blank = vec![Marks::new(); marks.len()];
             out.extend(mark_ops(&["blocks", id, "text"], &blank, &marks));
             for (key, v) in para_values(p)? {
@@ -238,7 +318,7 @@ pub fn create_ops(id: &str, block: &Block, at: usize, out: &mut Vec<Value>) -> R
             }
         }
     }
-    out.push(json!({"op": "list.insert", "path": ["body"], "at": at, "value": id}));
+    out.push(json!({"op": "list.insert", "path": list, "at": at, "value": id}));
     Ok(())
 }
 
@@ -255,17 +335,17 @@ pub fn para_values(p: &Paragraph) -> Result<[(&'static str, Option<Value>); 3], 
 
 /// The ops that take block `old` to `new` under the same id (both paragraphs, or both tables); `None` when they are not
 /// the same kind (the caller replaces the block). Returns whether the edit is text-only (typing).
-pub fn edit_ops(id: &str, old: &Block, new: &Block, out: &mut Vec<Value>) -> Result<Option<EditKind>, ShimError> {
+pub fn edit_ops(id: &str, old: &Block, new: &Block, out: &mut Vec<Value>, cx: &Shared<'_>) -> Result<Option<EditKind>, ShimError> {
     match (old, new) {
         (Block::Table(a), Block::Table(b)) => {
             if a != b {
-                out.push(set(&["blocks", id], "v", bounded("a table", json_of(b)?)?));
+                out.push(set(&["blocks", id], "v", bounded("a table", table_out(b, cx)?)?));
             }
             Ok(Some(EditKind::Structure))
         }
         (Block::Para(a), Block::Para(b)) => {
             let (old_chars, new_chars): (Vec<char>, Vec<char>) = (a.text.chars().collect(), b.text.chars().collect());
-            let (old_marks, new_marks) = (char_marks(a)?, char_marks(b)?);
+            let (old_marks, new_marks) = (char_marks(a, cx)?, char_marks(b, cx)?);
             // The one span that changed: everything outside the common prefix and suffix.
             let mut p = 0;
             while p < old_chars.len() && p < new_chars.len() && old_chars[p] == new_chars[p] {
@@ -330,11 +410,11 @@ pub enum EditKind {
 }
 
 /// Whether two blocks hold the same content (text, per-character formatting, paragraph values), runs merged or not.
-pub fn same_content(a: &Block, b: &Block) -> Result<bool, ShimError> {
+pub fn same_content(a: &Block, b: &Block, cx: &Shared<'_>) -> Result<bool, ShimError> {
     Ok(match (a, b) {
-        (Block::Table(x), Block::Table(y)) => x == y,
+        (Block::Table(x), Block::Table(y)) => x == y || table_out(x, cx)? == table_out(y, cx)?,
         (Block::Para(x), Block::Para(y)) => {
-            x.text == y.text && char_marks(x)? == char_marks(y)? && para_values(x)? == para_values(y)?
+            x.text == y.text && char_marks(x, cx)? == char_marks(y, cx)? && para_values(x)? == para_values(y)?
         }
         _ => false,
     })

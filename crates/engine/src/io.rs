@@ -131,6 +131,12 @@ pub fn open_bytes(name: &str, bytes: &[u8]) -> Result<Document, String> {
     open_bytes_with(name, bytes, None).map(|(doc, _)| doc)
 }
 
+/// The pictures a file carries, by their key in the document's media: OneOS live editing finds in a file's saved version the
+/// bytes of the pictures other people inserted (the room holds only their content addresses).
+pub fn pictures_in_file(name: &str, bytes: &[u8]) -> Result<Vec<(String, std::sync::Arc<Vec<u8>>)>, String> {
+    open_bytes(name, bytes).map(|doc| doc.media.into_iter().collect())
+}
+
 /// Open a Word 97-2003 binary file, decrypting it with `password` when it is password-protected
 /// (XOR, RC4, RC4 CryptoAPI). The errors for a missing or wrong password are the same texts the
 /// `.docx` reader gives, so [`needs_password`] and [`wrong_password`] recognise them.
@@ -721,4 +727,34 @@ pub fn save_path_with(path: &std::path::Path, _doc: &Document, _password: Option
 /// [`wordcraft_formats::txt::decode`]).
 pub fn decode_text(b: &[u8]) -> String {
     wordcraft_formats::txt::decode(b)
+}
+
+#[cfg(test)]
+mod picture_tests {
+    use std::sync::Arc;
+
+    use wordcraft_doc::para::OBJ;
+    use wordcraft_doc::{Block, Document, InlineObject, Paragraph, Run};
+
+    /// A 1 x 1 transparent PNG.
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0,
+        0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn a_saved_file_gives_back_the_picture_bytes_it_carries() {
+        let mut doc = Document::new();
+        let key = doc.add_media(PNG.to_vec(), "png");
+        let mut p = Paragraph::with_text("see ", Default::default());
+        p.text.push(OBJ);
+        p.runs = vec![Run { len: p.text.len(), props: Default::default() }];
+        p.objects = vec![InlineObject::Image { media: key, w: 10.0, h: 10.0, alt: String::new(), float: Default::default(), crop: [0.0; 4], ole: None }];
+        doc.body = vec![Arc::new(Block::Para(p))];
+        let bytes = crate::io::save_bytes_with("pic.docx", &doc, None, &crate::io::ExportOptions::default()).expect("a saved docx");
+        let found = crate::io::pictures_in_file("pic.docx", &bytes).expect("the file opens");
+        assert_eq!(found.len(), 1, "one picture: {:?}", found.iter().map(|(k, _)| k).collect::<Vec<_>>());
+        assert_eq!(found[0].1.as_slice(), PNG, "its bytes, exactly");
+        assert!(crate::io::pictures_in_file("pic.docx", b"not a docx").is_err());
+    }
 }

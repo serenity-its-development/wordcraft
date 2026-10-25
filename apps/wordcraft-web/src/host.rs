@@ -16,6 +16,10 @@
 //! - `craft:dirty {session, dirty}` (to the parent): unsaved changes appeared or went away.
 //! - `craft:failed {error}` (to the parent): the editor could not start.
 //! - `craft:crdt:*` both ways: the live editing channel ([`crate::collab`]).
+//! - `craft:media:need {session, hashes, have}` (to the parent) and `craft:media:file {session, name, versionId, bytes |
+//!   unchanged}` (from the parent): the pictures other people inserted are in the room only as content addresses; their bytes
+//!   are in the file's saved versions, which the host reads through the view lane. `craft:media:publish {session}` asks the
+//!   host to land a version soon after this window inserted a picture.
 //! - `craft:command` (from the parent) is answered `craft:result {ok: false}`: this editor takes no assistant commands yet.
 
 use std::cell::RefCell;
@@ -45,12 +49,17 @@ pub enum Event {
     Crdt { kind: String, body: serde_json::Value },
     /// `craft:refused`.
     Refused { code: String, reason: String },
+    /// `craft:media:file`: the file's latest saved version (`bytes`), which carries the pictures other people inserted; or
+    /// `unchanged` (the version the frame already searched).
+    MediaFile { name: String, version_id: String, bytes: Option<Vec<u8>> },
 }
 
 #[derive(Default)]
 struct Shared {
     opened: Opened,
     events: VecDeque<Event>,
+    /// How many `craft:saved` the host has sent: a version landed.
+    saved: u64,
 }
 
 #[derive(Clone)]
@@ -147,6 +156,29 @@ impl Bridge {
         let _ = self.parent.post_message(&parsed, &self.origin);
     }
 
+    /// How many versions the host has landed since this page opened.
+    pub fn saved_count(&self) -> u64 {
+        self.shared.borrow().saved
+    }
+
+    /// `craft:media:need {session, hashes, have}`: the shared document uses pictures this window has no bytes for (their content
+    /// addresses); the host answers with the file's latest saved version, which carries them, unless it is still `have`.
+    pub fn post_media_need(&self, hashes: &[String], have: &str) {
+        let session = self.shared.borrow().opened.session.clone();
+        let list = js_sys::Array::new();
+        for h in hashes {
+            list.push(&JsValue::from_str(h));
+        }
+        self.send(&[("type", "craft:media:need".into()), ("session", session.as_str().into()), ("hashes", list.into()), ("have", have.into())]);
+    }
+
+    /// `craft:media:publish {session}`: this window inserted a picture; the other windows can only get its bytes from a saved
+    /// version of the file, so the host is asked to land one soon.
+    pub fn post_media_publish(&self) {
+        let session = self.shared.borrow().opened.session.clone();
+        self.send(&[("type", "craft:media:publish".into()), ("session", session.as_str().into())]);
+    }
+
     /// Save (or a checkpoint, when `checkpoint` names the room's request) as a message the host turns into a new version.
     pub fn post_save(&self, path: &str, bytes: &[u8], save_as: bool, checkpoint: Option<u64>) -> Result<(), String> {
         let (session, base, read_only, opened_name) = {
@@ -209,9 +241,17 @@ impl Bridge {
                     inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes));
                 }
                 "craft:saved" if string(&data, "session").as_deref() == Some(known.as_str()) => {
+                    let mut shared = bridge.shared.borrow_mut();
+                    shared.saved += 1;
                     if let Some(version) = string(&data, "versionId") {
-                        bridge.shared.borrow_mut().opened.version_id = version;
+                        shared.opened.version_id = version;
                     }
+                }
+                "craft:media:file" if string(&data, "session").as_deref() == Some(known.as_str()) => {
+                    let version_id = string(&data, "versionId").unwrap_or_default();
+                    let name = string(&data, "name").unwrap_or_default();
+                    let bytes = if boolean(&data, "unchanged") { None } else { bytes(&data) };
+                    bridge.shared.borrow_mut().events.push_back(Event::MediaFile { name, version_id, bytes });
                 }
                 "craft:refused" if string(&data, "session").as_deref() == Some(known.as_str()) => {
                     let code = string(&data, "code").unwrap_or_default();

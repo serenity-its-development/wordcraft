@@ -44,11 +44,28 @@ const APP_CATALOG: &str = "wordcraft.tsv";
 fn craft_i18n() -> String {
     println!("cargo::rerun-if-env-changed=CRAFT_I18N_DIR");
     println!("cargo::rerun-if-env-changed=CRAFT_I18N_REQUIRED");
+    println!("cargo::rerun-if-env-changed=CRAFT_I18N_LOCALES");
     let required = std::env::var("CRAFT_I18N_REQUIRED").is_ok_and(|v| v.trim() == "1");
+    // OneOS web build: the wasm is a static asset of at most 25 MiB, and every embedded locale is ~130 KiB of it, so the build
+    // names the locales it embeds (`CRAFT_I18N_LOCALES=de,fr,...`). Unset: every locale the checkout has.
+    let only: Option<Vec<String>> = std::env::var("CRAFT_I18N_LOCALES")
+        .ok()
+        .map(|v| v.split(',').map(|c| c.trim().to_owned()).filter(|c| !c.is_empty()).collect())
+        .filter(|v: &Vec<String>| !v.is_empty());
     let entries = match std::env::var_os("CRAFT_I18N_DIR").filter(|d| !d.is_empty()) {
         // Not canonicalized: on Windows that gives `\\?\C:\…`, which `include_str!` can't read.
         Some(dir) => match locales(&std::path::PathBuf::from(dir).join("locales")) {
-            Ok(entries) => entries,
+            Ok(entries) => match &only {
+                None => entries,
+                Some(want) => {
+                    for code in want {
+                        if !entries.iter().any(|(c, ..)| c == code) {
+                            println!("cargo::error=CRAFT_I18N_LOCALES names '{code}', which craft-i18n has no {APP_CATALOG} for");
+                        }
+                    }
+                    entries.into_iter().filter(|(c, ..)| want.contains(c)).collect()
+                }
+            },
             Err(e) => {
                 let level = if required { "error" } else { "warning" };
                 println!("cargo::{level}=CRAFT_I18N_DIR: {e}; the interface is English only");

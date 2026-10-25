@@ -25,6 +25,15 @@ use wordcraft_layout::{DocLayout, LayoutCache, LayoutOptions, NumeralMode, ViewM
 
 use crate::{CmdError, Registry};
 
+/// Another person's place in a live document: drawn as a caret (or a selection) in their colour, with their name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteCursor {
+    pub name: String,
+    pub color: [u8; 3],
+    pub anchor: Pos,
+    pub focus: Pos,
+}
+
 /// A selection: anchor (where it started) and focus (where the caret is).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Selection {
@@ -469,6 +478,13 @@ pub struct Session {
     /// shell to send.
     pub collab_undo: bool,
     pub collab_undo_requests: Vec<bool>,
+    /// OneOS live editing: where the other people in the room are (drawn as their carets and selections; the host shell keeps
+    /// the list current each frame). Never part of the document.
+    pub remote_cursors: Vec<RemoteCursor>,
+    /// OneOS live editing: bits that make this window's new comment numbers differ from every other window's (two people adding
+    /// a comment at once must not both be comment 5), and how many this window has drawn. Zero salt: the editor counts up.
+    pub live_comment_salt: u32,
+    live_comment_count: u32,
     /// Macro being recorded: (name, steps).
     pub recording: Option<(String, Vec<(String, Value)>)>,
     pub macros: std::collections::BTreeMap<String, Vec<(String, Value)>>,
@@ -742,6 +758,9 @@ impl Session {
             last_command: None,
             collab_undo: false,
             collab_undo_requests: Vec::new(),
+            remote_cursors: Vec::new(),
+            live_comment_salt: 0,
+            live_comment_count: 0,
             recording: None,
             macros: Default::default(),
             versions: Vec::new(),
@@ -1306,6 +1325,36 @@ impl Session {
 
     /// OneOS live editing: show the body the shared document now holds. Selection stays where it can; the undo history
     /// and the saved/unsaved state are left alone (this is other people's typing, already in the room).
+    /// OneOS live editing: the next comment number for this window. Comments are numbered by the document (one past the largest);
+    /// in a live document two windows would both pick the same number for different comments, so a live window draws its
+    /// numbers from its own salt instead (31 bits: the top half is for comments the host's own panel made).
+    pub fn next_live_comment_id(&mut self) -> Option<u32> {
+        if self.live_comment_salt == 0 {
+            return None;
+        }
+        loop {
+            self.live_comment_count = self.live_comment_count.wrapping_add(1);
+            let mut x = self.live_comment_salt ^ self.live_comment_count.wrapping_mul(0x9e37_79b1);
+            x ^= x >> 16;
+            x = x.wrapping_mul(0x85eb_ca6b);
+            x ^= x >> 13;
+            let id = (x & 0x7fff_ffff).max(1);
+            if !self.doc.comments.contains_key(&id) {
+                return Some(id);
+            }
+        }
+    }
+
+    /// OneOS live editing: change the document with what other people did beyond its body (styles, headers and footers,
+    /// comments, pictures). The undo history and the saved/unsaved state are left alone, like [`Self::replace_body_remote`].
+    pub fn change_remote(&mut self, f: impl FnOnce(&mut Document)) {
+        f(&mut self.doc);
+        self.doc.ensure_nonempty();
+        self.clamp_selection();
+        self.touch();
+        self.relayout();
+    }
+
     pub fn replace_body_remote(&mut self, body: wordcraft_doc::Blocks) {
         self.doc.body = body;
         self.doc.ensure_nonempty();
@@ -1407,6 +1456,9 @@ impl Session {
             // Host wiring (OneOS live editing), like the file path: not an edit.
             collab_undo: _,
             collab_undo_requests: _,
+            remote_cursors: _,
+            live_comment_salt: _,
+            live_comment_count: _,
             recording: _,
             macros: _,
             versions: _,
