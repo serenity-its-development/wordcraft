@@ -294,7 +294,6 @@ pub struct UiState {
     /// Headings whose sub-headings the Navigation pane hides (#1997); per session, not saved.
     #[serde(skip)]
     pub nav_collapsed: std::collections::HashSet<wordcraft_doc::Path>,
-    pub show_discord: bool,
     /// User name (File › Options) for comments and tracked changes; empty keeps the default.
     pub author: String,
     /// Desktop: the main window's size and position, restored at the next launch.
@@ -409,7 +408,6 @@ impl Default for UiState {
             nav_tab: "headings".into(),
             nav_pane: false,
             nav_collapsed: Default::default(),
-            show_discord: true,
             author: String::new(),
             window: None,
             language: i18n::AUTO.into(),
@@ -1810,10 +1808,6 @@ impl WordApp {
                         .into(),
                 ));
             }
-            "ui.discord" => {
-                self.canvas.open_url = Some("https://discord.gg/artcraft".into());
-                json!({})
-            }
             "ui.caretAnimation" => {
                 // File › Options › Advanced › Animation: `value` true or false turns the caret's
                 // glide and fading blink on or off; no value reads it.
@@ -2521,9 +2515,9 @@ impl WordApp {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
         let title = if self.has_document() {
-            format!("{}{} - WordCraft", self.title_stem(), if self.session.dirty { " •" } else { "" })
+            format!("{}{} - Write", self.title_stem(), if self.session.dirty { " •" } else { "" })
         } else {
-            "WordCraft".to_string()
+            "Write".to_string()
         };
         if title != self.sent_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -2915,7 +2909,6 @@ pub(crate) fn works_without_document(id: &str) -> bool {
             | "ui.openFileDialog"
             | "ui.fileBrowser"
             | "ui.makeDefaultApp"
-            | "ui.discord"
             | "ui.caretAnimation"
             | "ui.startScreen"
     ) || id.starts_with("help.")
@@ -3586,12 +3579,12 @@ mod tests {
         let a = h.state_mut();
         assert!(!a.ui.backstage, "Esc leaves the Start screen");
         assert!(!a.has_document(), "for an empty window, not a blank document");
-        assert_eq!(a.sent_title, "WordCraft", "the window is titled with the app alone");
+        assert_eq!(a.sent_title, "Write", "the window is titled with the app alone");
         // The ribbon's commands are off, but Help, the File tab and the settings work.
         for id in ["format.bold", "text.insert", "file.save", "file.saveAs", "file.print", "edit.paste", "insert.table", "ui.print"] {
             assert!(!widgets::enabled(a, id), "{id} is off with no document");
         }
-        for id in ["file.new", "file.open", "ui.backstage", "ui.tab", "ui.discord", "file.options", "ui.theme"] {
+        for id in ["file.new", "file.open", "ui.backstage", "ui.tab", "file.options", "ui.theme"] {
             assert!(widgets::enabled(a, id), "{id} works with no document");
         }
         assert!(!chrome::qat_enabled(a, "file.save"));

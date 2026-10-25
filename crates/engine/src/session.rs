@@ -463,6 +463,12 @@ pub struct Session {
     pub picture_looks: std::collections::HashMap<String, crate::cmd::objects::PictureLook>,
     /// Last mutating command (Repeat).
     pub last_command: Option<(String, Value)>,
+    /// OneOS live editing: Undo and Redo are the SHARED document's (they go to the host, which undoes this person's own
+    /// last change in the room), not this session's snapshots, which would also take back what others typed.
+    /// `edit.undo` / `edit.redo` then queue a request (`true` = undo) in [`Self::collab_undo_requests`] for the host
+    /// shell to send.
+    pub collab_undo: bool,
+    pub collab_undo_requests: Vec<bool>,
     /// Macro being recorded: (name, steps).
     pub recording: Option<(String, Vec<(String, Value)>)>,
     pub macros: std::collections::BTreeMap<String, Vec<(String, Value)>>,
@@ -734,6 +740,8 @@ impl Session {
             originals: Default::default(),
             picture_looks: Default::default(),
             last_command: None,
+            collab_undo: false,
+            collab_undo_requests: Vec::new(),
             recording: None,
             macros: Default::default(),
             versions: Vec::new(),
@@ -1296,6 +1304,16 @@ impl Session {
         blank_document(&self.region())
     }
 
+    /// OneOS live editing: show the body the shared document now holds. Selection stays where it can; the undo history
+    /// and the saved/unsaved state are left alone (this is other people's typing, already in the room).
+    pub fn replace_body_remote(&mut self, body: wordcraft_doc::Blocks) {
+        self.doc.body = body;
+        self.doc.ensure_nonempty();
+        self.clamp_selection();
+        self.touch();
+        self.relayout();
+    }
+
     /// Replace the document (open/new).
     pub fn set_document(&mut self, doc: Document) {
         self.autocap = None;
@@ -1386,6 +1404,9 @@ impl Session {
             originals: _,
             picture_looks: _,
             last_command: _,
+            // Host wiring (OneOS live editing), like the file path: not an edit.
+            collab_undo: _,
+            collab_undo_requests: _,
             recording: _,
             macros: _,
             versions: _,

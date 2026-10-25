@@ -2,12 +2,12 @@
 <!-- AppStream metadata (software centres, Flathub). Template: package.sh and the Flatpak
      manifest substitute @VERSION@ and @DATE@ from Cargo.toml and the build date. -->
 <component type="desktop-application">
-  <id>ai.storyteller.wordcraft</id>
+  <id>one.wkspace.write</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
   <name>WordCraft</name>
   <summary>Write and design documents; open and save Word files</summary>
-  <developer id="ai.storyteller">
+  <developer id="one.wkspace">
     <name>Learning Machines LLC</name>
   </developer>
   <description>
@@ -15,13 +15,11 @@
       WordCraft is a fast, open-source word processor with a familiar ribbon: styles, tables, track changes, references, mail merge, and .docx, PDF, ODT, RTF, HTML and Markdown files. It can be driven by AI agents over MCP.
     </p>
   </description>
-  <launchable type="desktop-id">ai.storyteller.wordcraft.desktop</launchable>
-  <icon type="stock">ai.storyteller.wordcraft</icon>
+  <launchable type="desktop-id">one.wkspace.write.desktop</launchable>
+  <icon type="stock">one.wkspace.write</icon>
   <!-- Only url types known to appstream 0.15 (Ubuntu 22.04, where CI validates): no vcs-browser. -->
-  <url type="homepage">https://getartcraft.com/apps/wordcraft</url>
   <url type="bugtracker">https://github.com/storytold/wordcraft/issues</url>
   <url type="help">https://github.com/storytold/wordcraft</url>
-  <url type="contact">https://discord.gg/artcraft</url>
   <categories>
     <category>Office</category>
     <category>WordProcessor</category>

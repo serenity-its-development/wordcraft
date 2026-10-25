@@ -6568,6 +6568,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "wordcraft-collab"
+version = "0.10.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wordcraft-doc",
+]
+
+[[package]]
+name = "wordcraft-collab-node"
+version = "0.10.0"
+dependencies = [
+ "serde_json",
+ "wasm-bindgen",
+ "wordcraft-collab",
+ "wordcraft-doc",
+]
+
+[[package]]
 name = "wordcraft-control-key"
 version = "0.10.0"
 
@@ -6821,6 +6840,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "wordcraft-collab",
  "wordcraft-doc",
  "wordcraft-engine",
  "wordcraft-fonts",

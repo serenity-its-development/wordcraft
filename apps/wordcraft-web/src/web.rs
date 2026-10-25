@@ -27,9 +27,10 @@ pub fn start() {
             log::error!("missing <canvas id=\"{CANVAS_ID}\">");
             return;
         };
-        // `?host=parent`: a same-origin page framing WordCraft opens documents in it and stores
-        // what it saves (`host`). That page guards leaving it, so this one doesn't.
-        let bridge = if query_param("host").as_deref() == Some("parent") { crate::host::Bridge::new() } else { None };
+        // OneOS host bridge: the frame page's loader (`bootstrap.js`) declares the ONE parent origin this editor answers
+        // to (`globalThis.__craftHost`); with none declared the editor runs unframed and saves download. The host guards
+        // leaving the page, so this one doesn't.
+        let bridge = crate::host::Bridge::new();
         let app_bridge = bridge.clone();
         let dirty = Rc::new(Cell::new(false));
         let saves = AsyncSaves::default();
@@ -85,21 +86,13 @@ pub fn start() {
                         let doc = app.session.blank_document();
                         app.session.set_document(doc);
                     }
-                    let mut prefs = crate::prefs::PrefsSync::new(stored);
+                    let prefs = crate::prefs::PrefsSync::new(stored);
                     // No document to show: start on File › Home, as the desktop app does (#766).
                     if !sample {
                         app.start_screen();
                     }
-                    // The host's name for the user signs this visit's work, but isn't stored as the
-                    // browser's own preference, which a visit outside the host would restore.
-                    if app_bridge.is_some()
-                        && let Some(author) = query_param("author")
-                    {
-                        let own = app.session.author.clone();
-                        crate::host::Bridge::set_author(&mut app, &author);
-                        prefs.keep_own_author(&app.session.author, &own);
-                    }
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs }))
+                    let collab = app_bridge.clone().map(crate::collab::Collab::new);
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, collab }))
                 }),
             )
             .await;
@@ -123,10 +116,6 @@ fn query() -> String {
     web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
 }
 
-fn query_param(key: &str) -> Option<String> {
-    web_sys::UrlSearchParams::new_with_str(&query()).ok()?.get(key)
-}
-
 /// Wraps the app to read dropped files asynchronously (browsers can't read them synchronously)
 /// and feed them through the inbox.
 struct WebShell {
@@ -134,6 +123,8 @@ struct WebShell {
     inbox: Inbox,
     messages: Rc<RefCell<Vec<String>>>,
     prefs: crate::prefs::PrefsSync,
+    /// Live editing through the host (`collab`), when framed by it.
+    collab: Option<crate::collab::Collab>,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -166,7 +157,13 @@ impl eframe::App for WebShell {
         for msg in msgs {
             self.app.status(msg);
         }
+        if let Some(collab) = self.collab.as_mut() {
+            collab.pre(&self.app);
+        }
         self.app.logic(ctx);
+        if let Some(collab) = self.collab.as_mut() {
+            collab.post(&mut self.app);
+        }
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
             match local_storage() {

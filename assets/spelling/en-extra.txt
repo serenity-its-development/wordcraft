@@ -4,7 +4,6 @@
 # inflection rules in crates/proof/src/lib.rs, so list "desktop", not "desktops".
 airbag
 airfare
-artcraft
 autocomplete
 autocorrect
 autofill

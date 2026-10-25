@@ -18,7 +18,13 @@ fn undo_to(s: &mut Session, v: &Value) -> CmdResult {
     if s.step_lifts_protection(false) {
         return Err(CmdError::Disabled("edit.undoTo: use Stop Protection to lift the document's protection".into()));
     }
-    let undone = s.undo_steps(n);
+    // OneOS live editing: the steps are the shared document's (see `Session::collab_undo`).
+    let undone = if s.collab_undo {
+        s.collab_undo_requests.extend(std::iter::repeat_n(true, n));
+        n
+    } else {
+        s.undo_steps(n)
+    };
     let mut r = sel_result(s)?;
     if let Some(m) = r.as_object_mut() {
         m.insert("undone".into(), json!(undone));
@@ -37,6 +43,10 @@ pub fn specs() -> Vec<CommandSpec> {
             if s.step_lifts_protection(false) {
                 return Err(CmdError::Disabled("edit.undo: use Stop Protection to lift the document's protection".into()));
             }
+            if s.collab_undo {
+                s.collab_undo_requests.push(true);
+                return sel_result(s);
+            }
             s.undo();
             sel_result(s)
         })
@@ -53,6 +63,10 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("edit.redo", "Redo", "Quick Access Toolbar", |s, _| {
             if s.step_lifts_protection(true) {
                 return Err(CmdError::Disabled("edit.redo: use Stop Protection to lift the document's protection".into()));
+            }
+            if s.collab_undo {
+                s.collab_undo_requests.push(false);
+                return sel_result(s);
             }
             s.redo();
             sel_result(s)
