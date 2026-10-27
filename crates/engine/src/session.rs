@@ -857,6 +857,18 @@ impl Session {
     pub fn rev(&self) -> u64 {
         self.rev
     }
+    /// Open at where the host's read-only first view was left ([`crate::first_view`]): the text it had selected, or the start of the
+    /// paragraph at its top edge, becomes the selection. Not an edit (nothing is touched, nothing to undo). False when the document has no place for it.
+    pub fn place_first_view(&mut self, selection: &str, y_fraction: f64) -> bool {
+        match crate::first_view::locate(&self.doc, selection, y_fraction) {
+            Some(place) => {
+                self.sel = Selection { anchor: place.anchor(), focus: place.focus() };
+                self.also_selected.clear();
+                true
+            }
+            None => false,
+        }
+    }
     /// Which document is open (see `document_id`): lets a caller tell an edit from a replacement.
     pub fn document_id(&self) -> u64 {
         self.document_id

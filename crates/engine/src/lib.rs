@@ -9,6 +9,7 @@
 pub mod catalog;
 pub mod cmd;
 pub mod file_access;
+pub mod first_view;
 pub mod io;
 mod io_ext;
 pub mod keymap;
