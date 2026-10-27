@@ -2177,6 +2177,13 @@ impl WordApp {
         }
     }
 
+    /// Open at where the host's read-only first view was left (OneOS progressive open): the text it had selected (else the start of the
+    /// paragraph at its top edge) becomes the selection, and the canvas scrolls to the same fraction of the document. Not an edit.
+    pub fn open_at_first_view(&mut self, selection: &str, x_fraction: f64, y_fraction: f64) {
+        self.session.place_first_view(selection, y_fraction);
+        self.canvas.scroll_to_fraction(x_fraction as f32, y_fraction as f32);
+    }
+
     /// Per-frame logic before layout: control requests, screenshots, shortcuts, file drops.
     pub fn logic(&mut self, ctx: &egui::Context) {
         let lang = i18n::Lang::from_pref(&self.ui.language);

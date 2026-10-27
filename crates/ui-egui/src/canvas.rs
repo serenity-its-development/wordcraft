@@ -355,6 +355,15 @@ pub(crate) fn press_count(last: Option<(f64, Pos2, u8)>, now: f64, at: Pos2, del
 }
 
 impl CanvasState {
+    /// Scroll to a fraction of the scrollable extent (0 = the start, 1 = the end), the way the host's first view was left; the
+    /// extent is the last frame's, so the view has been laid out first.
+    pub fn scroll_to_fraction(&mut self, x: f32, y: f32) {
+        let f = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        self.scroll_request = Some(vec2(f(x) * self.scroll_max.x, f(y) * self.scroll_max.y));
+        // The place is the one the host said, not the caret's.
+        self.scroll_to_caret = false;
+    }
+
     /// True while a mouse drag-select is in progress (the mini toolbar waits for mouse-up).
     pub fn drag_selecting(&self) -> bool {
         self.dragging
@@ -4521,6 +4530,42 @@ mod tests {
         assert!(h.query_by_label("Page 9 of 12").is_some(), "scrolled to page 9, the status bar says page 9");
         assert!(h.query_by_label("Page 1 of 12").is_none());
         assert_eq!((h.state().session.rev(), &h.state().session.sel), (rev, &sel), "scrolling changes neither the document nor the selection");
+    }
+
+    /// OneOS progressive open: the editor opens at where the host's read-only first view was left - the selected text selected, the
+    /// canvas at the same fraction of the document - and that is not an edit.
+    #[test]
+    fn the_editor_opens_at_the_first_views_place() {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
+        for i in 0..11 {
+            a.run("text.insert", json!({"text": format!("Chapter {i} text")})).unwrap();
+            a.run("layout.break", json!({"kind": "page"})).unwrap();
+        }
+        a.run("view.commentsPane", json!({"value": false})).unwrap();
+        a.run("caret.docStart", json!({})).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        h.run_steps(6);
+        let rev = h.state().session.rev();
+        let max = h.state().canvas.scroll_max.y;
+        assert!(max > 1000.0, "twelve pages scroll: {max}");
+        h.state_mut().open_at_first_view("Chapter 8 text", 0.0, 0.75);
+        h.run_steps(6);
+        assert_eq!(h.state().session.selected_text(), "Chapter 8 text", "the first view's selection is the editor's");
+        let at = h.state().canvas.scroll_offset.y;
+        assert!((at - 0.75 * max).abs() < 2.0, "scrolled to three quarters: {at} of {max}");
+        assert_eq!(h.state().session.rev(), rev, "opening at a place is not an edit");
+        // No selection: the caret goes to the paragraph at the top edge, and the view goes to the top.
+        h.state_mut().open_at_first_view("", 0.0, 0.0);
+        h.run_steps(6);
+        assert!(h.state().session.sel.is_collapsed());
+        assert!(h.state().canvas.scroll_offset.y < 2.0, "back at the top");
     }
 
     /// `viewed_page`: the caret's page while any of its line is on screen, else the window's top page.
