@@ -148,9 +148,10 @@ impl Collab {
 
     /// A batch that put a picture reference in the room: the other windows can only get its bytes from a saved version.
     fn note_pictures(&mut self, batches: &[Batch]) {
-        let carries = batches.iter().flat_map(|b| &b.ops).any(|op| {
-            matches!(op.get("key").and_then(Value::as_str), Some("obj" | "v")) && op.to_string().contains("\"cas-")
-        });
+        let carries = batches
+            .iter()
+            .flat_map(|b| &b.ops)
+            .any(|op| matches!(op.get("key").and_then(Value::as_str), Some("obj" | "v")) && op.to_string().contains("\"cas-"));
         if carries && self.publish_at.is_none() {
             self.publish_at = Some((0, self.bridge.saved_count()));
         }
@@ -354,6 +355,23 @@ impl Collab {
         }
     }
 
+    /// The assistant's runs the host relayed (`craft:command`): once the document is drawn, each is judged and run as ONE undo step
+    /// through the window (so the live room hears it as any local edit), or answered with the reason it did not run.
+    fn run_host_commands(&mut self, app: &mut WordApp) {
+        if app.session.document_id() == self.baseline {
+            return;
+        }
+        let session = self.bridge.opened().session;
+        for run in self.bridge.take_runs() {
+            let outcome = if run.method == "command.batch" {
+                app.run_command_batch(&run.params)
+            } else {
+                Err(format!("unknown-method: '{}' is not a command this editor answers", run.method))
+            };
+            self.bridge.post_result(&session, run.id, outcome);
+        }
+    }
+
     /// Once per frame AFTER the app's own pass.
     pub fn post(&mut self, app: &mut WordApp) {
         if !self.loaded && self.phase != Phase::Off && app.session.document_id() != self.baseline {
@@ -370,6 +388,7 @@ impl Collab {
                 Some(Event::Opened(_)) | None => break,
             }
         }
+        self.run_host_commands(app);
         if self.loaded {
             self.flush_local(app);
         }
@@ -389,7 +408,11 @@ impl Collab {
         let sel = &app.session.sel;
         let Some(body) = self.shim.cursor_for(&sel.anchor, &sel.focus) else { return };
         let moved = self.last_cursor.as_ref() != Some(&body);
-        let due = if moved { now.saturating_sub(self.last_cursor_ms) >= CURSOR_MIN_MS } else { now.saturating_sub(self.last_cursor_ms) >= CURSOR_REPEAT_MS };
+        let due = if moved {
+            now.saturating_sub(self.last_cursor_ms) >= CURSOR_MIN_MS
+        } else {
+            now.saturating_sub(self.last_cursor_ms) >= CURSOR_REPEAT_MS
+        };
         if !due {
             return;
         }

@@ -57,6 +57,7 @@ pub mod file_dialogs;
 pub mod format_shape;
 pub mod frame;
 pub mod guides;
+pub mod host_commands;
 pub mod i18n;
 pub mod ibeam;
 pub mod icons;

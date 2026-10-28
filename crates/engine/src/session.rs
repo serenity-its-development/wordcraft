@@ -1215,6 +1215,18 @@ impl Session {
         let keep = mark.saturating_sub(self.undo_evicted).saturating_add(1);
         self.history.truncate(usize::try_from(keep).unwrap_or(usize::MAX));
     }
+    /// Names the undo step that was the first one pushed since `mark` (see [`Session::undo_mark`]): a run of commands that
+    /// became one step by [`Session::merge_undo_since`] is named for the whole run. False when nothing was pushed since.
+    pub fn name_undo_step_since(&mut self, mark: u64, label: &str) -> bool {
+        let at = usize::try_from(mark.saturating_sub(self.undo_evicted)).unwrap_or(usize::MAX);
+        match self.history.get_mut(at) {
+            Some(u) => {
+                Arc::make_mut(u).label = label.to_string();
+                true
+            }
+            None => false,
+        }
+    }
     pub fn undo_labels(&self) -> Vec<String> {
         self.history.iter().rev().map(|u| u.label.clone()).collect()
     }

@@ -21,8 +21,13 @@ fn json_of(blocks: &[Arc<Block>]) -> String {
 }
 
 fn batches_json(batches: &[Batch]) -> String {
-    Value::Array(batches.iter().map(|b| json!({"seq": b.seq, "ops": b.ops, "label": b.label, "undo": if b.join { "join" } else { "step" }, "seed": b.seed})).collect())
-        .to_string()
+    Value::Array(
+        batches
+            .iter()
+            .map(|b| json!({"seq": b.seq, "ops": b.ops, "label": b.label, "undo": if b.join { "join" } else { "step" }, "seed": b.seed}))
+            .collect(),
+    )
+    .to_string()
 }
 
 fn err(e: impl std::fmt::Display) -> JsError {
@@ -31,6 +36,64 @@ fn err(e: impl std::fmt::Display) -> JsError {
 
 fn text_part(kind: PartKind, text: &str) -> Part {
     Part { kind, blocks: vec![para_block(Paragraph::with_text(text, Default::default()))], ..Default::default() }
+}
+
+/// Write's host window for node (the AI-drive test): what the browser build does with the host's `craft:open`, `craft:command` and
+/// `craft:save`, on the engine alone. A [`HostWindow`] opens a document from its bytes, runs the assistant's `command.batch`
+/// (`wordcraft_engine::host_commands`, the function the window answers `craft:command` with) and writes the file a Save would hand
+/// the host (`file_b64`). Nothing here is a second implementation.
+#[wasm_bindgen]
+pub struct HostWindow {
+    session: wordcraft_engine::Session,
+    name: String,
+}
+
+#[wasm_bindgen]
+impl HostWindow {
+    /// Open `name`'s bytes (base64), or a new blank document when there are none.
+    #[wasm_bindgen(constructor)]
+    pub fn new(name: String, file_b64: String) -> Result<HostWindow, JsError> {
+        use base64::Engine as _;
+        let doc = if file_b64.is_empty() {
+            Document::new()
+        } else {
+            let bytes = base64::engine::general_purpose::STANDARD.decode(file_b64.as_bytes()).map_err(|_| err("the file is not base64"))?;
+            wordcraft_engine::io::open_bytes(&name, &bytes).map_err(err)?
+        };
+        Ok(HostWindow { session: wordcraft_engine::Session::new(doc), name })
+    }
+
+    /// The window's `command.batch`: `params` is the host's `{label, steps}` as JSON; the answer is the `result` of `craft:result` as
+    /// JSON, or an error carrying its `<code>: <reason>` text.
+    pub fn command_batch(&mut self, params_json: &str) -> Result<String, JsError> {
+        let params: Value = serde_json::from_str(params_json).map_err(err)?;
+        let result = self.session.run_command_batch(&params).map_err(|e| JsError::new(&e))?;
+        Ok(result.to_string())
+    }
+
+    /// A registry command as the person's own ribbon runs it (Undo, in the tests), answered as JSON.
+    pub fn run(&mut self, command: &str, params_json: &str) -> Result<String, JsError> {
+        let params: Value = serde_json::from_str(params_json).map_err(err)?;
+        let result = self.session.run(command, &params).map_err(err)?;
+        Ok(result.to_string())
+    }
+
+    /// The document's body text, paragraphs joined by newlines.
+    pub fn text(&self) -> String {
+        self.session.doc.plain_text(wordcraft_doc::StoryRef::Body)
+    }
+
+    /// The file a Save would hand the host, base64: the document encoded as the file it was opened as.
+    pub fn file_b64(&self) -> Result<String, JsError> {
+        use base64::Engine as _;
+        let bytes = wordcraft_engine::io::save_bytes(&self.name, &self.session.doc).map_err(err)?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    /// Whether the document has changes the host does not hold yet.
+    pub fn dirty(&self) -> bool {
+        self.session.dirty
+    }
 }
 
 #[wasm_bindgen]
@@ -303,7 +366,15 @@ pub fn sample_picture(media_key: &str) -> String {
     let mut p = Paragraph::with_text("see ", Default::default());
     p.text.push(wordcraft_doc::para::OBJ);
     p.runs = vec![wordcraft_doc::Run { len: p.text.len(), props: Default::default() }];
-    p.objects = vec![wordcraft_doc::InlineObject::Image { media: media_key.to_owned(), w: 100.0, h: 50.0, alt: String::new(), float: Default::default(), crop: [0.0; 4], ole: None }];
+    p.objects = vec![wordcraft_doc::InlineObject::Image {
+        media: media_key.to_owned(),
+        w: 100.0,
+        h: 50.0,
+        alt: String::new(),
+        float: Default::default(),
+        crop: [0.0; 4],
+        ole: None,
+    }];
     serde_json::to_string(&Block::Para(p)).unwrap_or_default()
 }
 

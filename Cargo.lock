@@ -6581,10 +6581,12 @@ dependencies = [
 name = "wordcraft-collab-node"
 version = "0.10.0"
 dependencies = [
+ "base64 0.22.1",
  "serde_json",
  "wasm-bindgen",
  "wordcraft-collab",
  "wordcraft-doc",
+ "wordcraft-engine",
 ]
 
 [[package]]

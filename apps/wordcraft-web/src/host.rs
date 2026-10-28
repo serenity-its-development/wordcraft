@@ -23,7 +23,10 @@
 //! - `craft:opened {session}` (to the parent): the document is loaded and drawn; the editor takes input. `craft:view {session, scrollTop,
 //!   scrollHeight, clientHeight, selection ...}` (from the parent, kept by the loader on `globalThis.__craftFirstView`): where the host's
 //!   read-only first view was left; the editor opens there and answers `craft:viewed {session}` once that is drawn ([`crate::handoff`]).
-//! - `craft:command` (from the parent) is answered `craft:result {ok: false}`: this editor takes no assistant commands yet.
+//! - `craft:command {session, id, method: "command.batch", params: {label, steps: [{name, args?}]}}` (from the parent) is the
+//!   assistant's allow-listed run (`wordcraft_engine::host_commands`): all of it as ONE undo step, or none of it. It is answered
+//!   `craft:result {session, id, ok:true, result}` or `{ok:false, error: "<code>: <reason>"}` (a command outside the list, a step
+//!   the document forbids, a file open read-only, or a `session` that is not the open one). A run waits until the document is drawn.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -44,6 +47,13 @@ pub struct Opened {
     pub collab: bool,
 }
 
+/// One relayed run: the host's request id and its `command.batch` params.
+pub struct HostRun {
+    pub id: f64,
+    pub method: String,
+    pub params: serde_json::Value,
+}
+
 /// What the host said that the shell acts on, in order.
 pub enum Event {
     /// A `craft:open` arrived (its bytes went to the inbox).
@@ -61,6 +71,8 @@ pub enum Event {
 struct Shared {
     opened: Opened,
     events: VecDeque<Event>,
+    /// Runs the host relayed, waiting for the document to be drawn.
+    runs: VecDeque<HostRun>,
     /// How many `craft:saved` the host has sent: a version landed.
     saved: u64,
 }
@@ -80,7 +92,9 @@ pub struct Bridge {
 fn plain_origin(v: &str) -> bool {
     let Some((scheme, rest)) = v.split_once("://") else { return false };
     let local = rest == "localhost" || rest.starts_with("localhost:") || rest.starts_with("127.0.0.1");
-    (scheme == "https" || (scheme == "http" && local)) && !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+    (scheme == "https" || (scheme == "http" && local))
+        && !rest.is_empty()
+        && rest.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
 }
 
 impl Bridge {
@@ -126,7 +140,8 @@ impl Bridge {
             if last.0 != session {
                 *last = (session.clone(), None);
             }
-            if last.1 != Some(dirty) && bridge.send(&[("type", "craft:dirty".into()), ("session", session.as_str().into()), ("dirty", dirty.into())]) {
+            if last.1 != Some(dirty) && bridge.send(&[("type", "craft:dirty".into()), ("session", session.as_str().into()), ("dirty", dirty.into())])
+            {
                 last.1 = Some(dirty);
             }
         }));
@@ -138,6 +153,28 @@ impl Bridge {
 
     pub fn take_events(&self) -> Vec<Event> {
         self.shared.borrow_mut().events.drain(..).collect()
+    }
+
+    /// The runs the host relayed since the last call.
+    pub fn take_runs(&self) -> Vec<HostRun> {
+        self.shared.borrow_mut().runs.drain(..).collect()
+    }
+
+    /// `craft:result {session, id, ok, result|error}` to the parent.
+    pub fn post_result(&self, session: &str, id: f64, outcome: Result<serde_json::Value, String>) {
+        let mut fields: Vec<(&str, JsValue)> = vec![("type", "craft:result".into()), ("session", session.into()), ("id", id.into())];
+        match outcome {
+            Ok(result) => {
+                let value = serde_json::to_string(&result).ok().and_then(|j| js_sys::JSON::parse(&j).ok()).unwrap_or(JsValue::NULL);
+                fields.push(("ok", true.into()));
+                fields.push(("result", value));
+            }
+            Err(error) => {
+                fields.push(("ok", false.into()));
+                fields.push(("error", error.as_str().into()));
+            }
+        }
+        self.send(&fields);
     }
 
     /// `craft:opened {session}`: the document is loaded and drawn, the editor takes input (handoff.rs).
@@ -277,21 +314,37 @@ impl Bridge {
                     bridge.shared.borrow_mut().events.push_back(Event::Refused { code, reason });
                 }
                 "craft:command" => {
-                    let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::from_f64(0.0));
-                    bridge.send(&[
-                        ("type", "craft:result".into()),
-                        ("session", string(&data, "session").unwrap_or_default().as_str().into()),
-                        ("id", id),
-                        ("ok", false.into()),
-                        ("error", "this editor takes no assistant commands yet".into()),
-                    ]);
+                    let session = string(&data, "session").unwrap_or_default();
+                    let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let (current, read_only) = {
+                        let s = bridge.shared.borrow();
+                        (s.opened.session.clone(), s.opened.read_only)
+                    };
+                    if session.is_empty() || session != current {
+                        bridge.post_result(&session, id, Err("session-mismatch: this command is for another open of the file".into()));
+                    } else if read_only {
+                        bridge.post_result(&session, id, Err("read-only: this file is open to view; the assistant cannot change it".into()));
+                    } else {
+                        let params = js_sys::Reflect::get(&data, &JsValue::from_str("params"))
+                            .ok()
+                            .and_then(|p| js_sys::JSON::stringify(&p).ok())
+                            .and_then(|s| s.as_string())
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or(serde_json::Value::Null);
+                        let run = HostRun { id, method: string(&data, "method").unwrap_or_default(), params };
+                        bridge.shared.borrow_mut().runs.push_back(run);
+                    }
                 }
                 other => {
                     let Some(rest) = other.strip_prefix("craft:crdt:") else { return };
                     if string(&data, "session").as_deref() != Some(known.as_str()) {
                         return;
                     }
-                    let body = js_sys::JSON::stringify(&data).ok().and_then(|s| s.as_string()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::Value::Null);
+                    let body = js_sys::JSON::stringify(&data)
+                        .ok()
+                        .and_then(|s| s.as_string())
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or(serde_json::Value::Null);
                     bridge.shared.borrow_mut().events.push_back(Event::Crdt { kind: rest.to_owned(), body });
                 }
             }
