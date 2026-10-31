@@ -1053,6 +1053,7 @@ impl WordApp {
             // an imported .doc saved as .docx) is a new file too, never an overwrite.
             let opened_name = self.session.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string());
             let new_file = id == "file.saveAs" || opened_name.as_deref() != Some(name.as_str());
+            let legacy = self.legacy_word_path().then(|| opened_name.clone()).flatten();
             let delivered = match (&self.services.host_save, &self.services.download) {
                 (Some(host), _) => host(&name, &bytes, marked_saved && new_file),
                 (None, Some(download)) => download(&name, &bytes),
@@ -1069,6 +1070,10 @@ impl WordApp {
                 // The host page keeps the file under this name now, as a desktop save would.
                 if self.services.host_save.is_some() {
                     self.session.path = Some(std::path::PathBuf::from(&name));
+                    // An imported .doc: the save went beside it, and the window says so (files/973).
+                    if let Some(original) = &legacy {
+                        self.status(i18n::fmt(tl!("Saved as {name} beside {original}; {original} is unchanged."), &[("name", &name), ("original", original)]));
+                    }
                 }
             }
             // The browser's picker writes the file later (#1315): until it says how that went,
@@ -1974,6 +1979,21 @@ impl WordApp {
             .and_then(|p| p.extension())
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("doc") || e.eq_ignore_ascii_case("dot"))
+    }
+
+    /// What a Save dialog says about an import-only Word 97–2003 file (OneOS files/973, Mona
+    /// 2026-10-31: "saves as <name>.docx beside the original"): where the save goes, and that the
+    /// original is never written. `None` for any other document.
+    pub fn legacy_save_note(&self) -> Option<String> {
+        if !self.legacy_word_path() {
+            return None;
+        }
+        let original = self.session.path.as_ref()?.file_name()?.to_string_lossy().to_string();
+        let to = format!("{}.docx", self.title_stem());
+        Some(i18n::fmt(
+            tl!("{original} is an older Word file: it saves as {name} beside the original, which is never changed."),
+            &[("original", &original), ("name", &to)],
+        ))
     }
 
     /// The name a browser Save or Export without a name uses. An export is named after the
@@ -7021,6 +7041,22 @@ mod tests {
         a.session.path = Some("old.doc".into());
         a.execute("file.save", json!({})).unwrap();
         assert_eq!(got.borrow().first().map(|(n, s, _)| (n.as_str(), *s)), Some(("old.docx", true)));
+    }
+
+    /// The Save dialog of an imported .doc says where the save goes and that the original stays
+    /// (OneOS files/973); any other document has no such line.
+    #[test]
+    fn a_legacy_word_file_says_it_saves_beside_the_original() {
+        let (mut a, _) = host_app(false);
+        a.session.path = Some("Plan.doc".into());
+        assert_eq!(
+            a.legacy_save_note().as_deref(),
+            Some("Plan.doc is an older Word file: it saves as Plan.docx beside the original, which is never changed.")
+        );
+        a.execute("file.save", json!({})).unwrap();
+        assert_eq!(a.legacy_save_note(), None, "after the save the window is the .docx");
+        a.session.path = Some("Plan.docx".into());
+        assert_eq!(a.legacy_save_note(), None);
     }
 
     /// Saving a document the host page never sent is Save As, so the page doesn't overwrite a

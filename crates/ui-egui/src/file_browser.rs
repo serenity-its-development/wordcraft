@@ -314,8 +314,14 @@ pub(crate) fn show(app: &mut WordApp, ctx: &egui::Context) {
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, vec2(0.0, -20.0));
+    // Saving an imported .doc: the dialog says the save goes beside it as a .docx (OneOS files/973).
+    let note = matches!(b.req, FileDialogRequest::Save { .. }).then(|| app.legacy_save_note()).flatten();
     let shown = crate::window_close::window(ctx, window).show(ctx, |ui| {
         ui.set_width(620.0);
+        if let Some(note) = &note {
+            ui.label(egui::RichText::new(note).color(t.text_dim));
+            ui.add_space(6.0);
+        }
         done = body(ui, &mut b, &t);
     });
     if shown.is_some_and(|s| crate::window_close::show(ctx, &s.response, &t)) {
