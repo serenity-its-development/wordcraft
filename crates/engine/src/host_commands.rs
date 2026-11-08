@@ -637,7 +637,7 @@ pub const LEFT_OUT: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "Interactive: it opens a dialog, begins a pointer gesture or inks with a pen, which only a person's pointer can finish (use the command that takes the numbers: para.set, table.columnWidth, select.range, ...).",
+        "Interactive: it opens a dialog, begins a pointer gesture or inks with a pen, which only a person's pointer can finish (use the command that takes the numbers: para.set, table.columnWidth, select.range and the like).",
         &[
             "select.dragUnit",
             "edit.formatPainter",
