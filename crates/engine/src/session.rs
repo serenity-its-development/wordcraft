@@ -681,6 +681,18 @@ const MAX_UNDO: usize = 500;
 /// How many steps the Undo button's list shows (#701); `edit.undoTo` reaches no further.
 pub const UNDO_LIST_MAX: usize = 100;
 
+/// A save's metadata on `doc` ([`Session::stamp_save`]).
+fn stamp(doc: &mut Document, view: &ViewState, author: &str) {
+    doc.settings.zoom = crate::cmd::view::saved_zoom(view);
+    let core = &mut doc.core;
+    core.modified = crate::cmd::now_iso();
+    if core.created.is_empty() {
+        core.created = core.modified.clone();
+    }
+    core.last_modified_by = author.to_string();
+    core.revision = core.revision.saturating_add(1);
+}
+
 impl Session {
     /// Queue a request for the front end. A headless session never drains the queue, so only
     /// the newest [`MAX_UI_REQUESTS`] are kept.
@@ -1161,14 +1173,14 @@ impl Session {
     /// front end that writes the bytes itself (the web build's download, #262). Like Word, the
     /// document also keeps the zoom it is shown at (#995).
     pub fn stamp_save(&mut self) {
-        self.doc.settings.zoom = crate::cmd::view::saved_zoom(&self.view);
-        let core = &mut self.doc.core;
-        core.modified = crate::cmd::now_iso();
-        if core.created.is_empty() {
-            core.created = core.modified.clone();
-        }
-        core.last_modified_by = self.author.clone();
-        core.revision = core.revision.saturating_add(1);
+        stamp(&mut self.doc, &self.view, &self.author);
+    }
+    /// The document as a save writes it ([`Self::stamp_save`]), as a COPY: the session's own document is only read, so
+    /// nothing is stamped, committed or marked saved (OneOS's ask for an export, `craft:export`).
+    pub fn stamped_copy(&self) -> Document {
+        let mut doc = self.doc.clone();
+        stamp(&mut doc, &self.view, &self.author);
+        doc
     }
     /// Whether typing is still collecting into one undo step (no other command since).
     pub fn typing_open(&self) -> bool {

@@ -175,6 +175,18 @@ impl eframe::App for WebShell {
             if handoff.after(bridge, app.session.document_id(), |view| app.open_at_first_view(&view.selection, view.x_fraction(), view.y_fraction())) {
                 ctx.request_repaint();
             }
+            // The host's asks for the bytes: the document as it stands, with nothing stamped, committed or marked saved.
+            for (request, keep_original) in bridge.take_exports() {
+                let opened = bridge.opened().name;
+                match self.app.host_export(&opened, keep_original) {
+                    Ok(export) => {
+                        if let Err(e) = bridge.post_export(&export.name, &export.bytes, request, &export.losses) {
+                            log::warn!("Write: the export could not be handed to the host: {e}");
+                        }
+                    }
+                    Err(e) => log::warn!("Write: {opened} was not exported: {e}"),
+                }
+            }
         }
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {

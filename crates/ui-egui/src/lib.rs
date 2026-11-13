@@ -238,6 +238,14 @@ pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 /// the file, and the save failed.
 pub type HostSaveFn = Box<dyn Fn(&str, &[u8], bool) -> Result<(), String>>;
 
+/// [`WordApp::host_export`]: the file name the bytes are in, the bytes, and what the host's file loses in them.
+#[derive(Debug, PartialEq)]
+pub struct HostExport {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub losses: Vec<String>,
+}
+
 /// Whether a pasted picture belongs in the document: the page has keyboard focus, and no
 /// Backstage or dialog is open (#1349). A focused text field (comment, Find box) means the page
 /// does not have focus, so `canvas_focused` already covers it; egui's own "wants keyboard input"
@@ -1994,6 +2002,33 @@ impl WordApp {
             tl!("{original} is an older Word file: it saves as {name} beside the original, which is never changed."),
             &[("original", &original), ("name", &to)],
         ))
+    }
+
+    /// The answer to the host's ask for the bytes of its file `opened` (`craft:export`: auto-save, save on close): what the
+    /// person's plain Save would write, taken as the document stands. The document is only read (`&self`): nothing is
+    /// stamped, committed or marked saved, so it keeps its unsaved state, and nothing is shown. An imported Word 97-2003
+    /// file has no writer, so the answer is its .docx twin (`<stem>.docx`, the name its Save writes beside it, files/973)
+    /// with the loss said; `keep_original` asks for the file's own format, which such a file cannot have, so it is refused.
+    /// A document with a password is encrypted as Save encrypts it (with fresh salts, so those bytes differ each time).
+    pub fn host_export(&self, opened: &str, keep_original: bool) -> Result<HostExport, String> {
+        let path = std::path::Path::new(opened);
+        let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        let legacy = matches!(ext.as_str(), "doc" | "dot");
+        let twin = format!("{}.docx", path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+        let held = self.session.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string());
+        // The window still holds the host's file (or, for an imported .doc already saved, its .docx twin).
+        if !self.has_document() || (held.as_deref() != Some(opened) && !(legacy && held.as_deref() == Some(twin.as_str()))) {
+            return Err(format!("the window does not hold {opened}"));
+        }
+        if legacy && keep_original {
+            return Err(format!("Write has no writer for .{ext}, so {opened} cannot be kept in its own format"));
+        }
+        let name = if legacy { twin } else { opened.to_string() };
+        let password = self.session.password.as_ref().map(wordcraft_engine::Password::as_str);
+        let opts = wordcraft_engine::cmd::file::export_options(&self.session, &json!({}));
+        let bytes = wordcraft_engine::io::save_bytes_with(&name, &self.session.stamped_copy(), password, &opts)?;
+        let losses = if legacy { vec![format!("Write has no writer for .{ext}, so it cannot keep the file in its older format")] } else { Vec::new() };
+        Ok(HostExport { name, bytes, losses })
     }
 
     /// The name a browser Save or Export without a name uses. An export is named after the
@@ -7057,6 +7092,86 @@ mod tests {
         assert_eq!(a.legacy_save_note(), None, "after the save the window is the .docx");
         a.session.path = Some("Plan.docx".into());
         assert_eq!(a.legacy_save_note(), None);
+    }
+
+    /// The app in a host page that keeps the files, recording each file it is handed with its bytes.
+    fn host_recording() -> (WordApp, std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>) {
+        let mut a = typed();
+        let got = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = got.clone();
+        a.services.download = Some(Box::new(|_, _| Err("downloads go to the host page".into())));
+        a.services.host_save = Some(Box::new(move |name: &str, bytes: &[u8], _| {
+            seen.borrow_mut().push((name.to_string(), bytes.to_vec()));
+            Ok(())
+        }));
+        (a, got)
+    }
+
+    /// What an export must leave as it was: the document, its unsaved state, its revision, its file, its undo and the status.
+    fn export_state(a: &WordApp) -> (wordcraft_doc::Document, bool, u64, Option<std::path::PathBuf>, Vec<String>, Option<String>) {
+        let status = a.status_msg.as_ref().map(|(s, _)| s.clone());
+        (a.session.doc.clone(), a.session.dirty, a.session.rev(), a.session.path.clone(), a.session.undo_labels(), status)
+    }
+
+    /// Run `pass` until it runs within one clock second: a save stamps the time to the second, so a pass crossing one cannot
+    /// compare an export with the save after it.
+    fn within_one_second(mut pass: impl FnMut() -> bool) {
+        for _ in 0..5 {
+            let start = wordcraft_engine::cmd::now_iso();
+            if pass() && wordcraft_engine::cmd::now_iso() == start {
+                return;
+            }
+        }
+        panic!("five passes each crossed a clock second");
+    }
+
+    /// The host's ask for the bytes (`craft:export`) of a file in Write's own formats is the bytes the person's Save then
+    /// writes, under the opened name, with no loss; and it is never a save: the document stays unsaved and unchanged, and
+    /// nothing is handed over, stamped or shown.
+    #[test]
+    fn an_export_for_the_host_is_the_bytes_of_a_save_and_leaves_the_document_unsaved_and_unchanged() {
+        for name in ["report.docx", "report.odt", "report.rtf"] {
+            within_one_second(|| {
+                let (mut a, got) = host_recording();
+                assert!(a.host_export(name, false).is_err(), "{name}: the window does not hold the host's file yet");
+                host_open(&mut a, name);
+                assert!(a.host_export("other.docx", false).is_err(), "{name}: only the host's own file is exported");
+                let before = export_state(&a);
+                let export = a.host_export(name, false).unwrap();
+                assert_eq!(a.host_export(name, true).unwrap(), export, "{name}: keeping the original is the same answer");
+                assert_eq!(export_state(&a), before, "{name}: an export changes nothing");
+                assert!(a.session.dirty, "{name}: an export is not a save: the work is still unsaved");
+                assert!(got.borrow().is_empty(), "{name}: nothing went to the host's save");
+                assert_eq!((export.name.as_str(), export.losses.len()), (name, 0));
+                a.execute("file.save", json!({})).unwrap();
+                assert_eq!(got.borrow().as_slice(), &[(name.to_string(), export.bytes.clone())], "{name}: Save writes those bytes");
+                true
+            });
+        }
+    }
+
+    /// An imported Word 97-2003 file has no writer: the export is its .docx twin, the bytes its Save writes beside it, with
+    /// the loss said; an ask to keep the original format is refused; the document stays unsaved and unchanged.
+    #[test]
+    fn an_export_of_an_imported_doc_is_its_docx_twin_with_the_loss_said() {
+        within_one_second(|| {
+            let (mut a, got) = host_recording();
+            a.session.path = Some("Plan.doc".into());
+            let before = export_state(&a);
+            let export = a.host_export("Plan.doc", false).unwrap();
+            assert_eq!(export.name, "Plan.docx");
+            assert_eq!(export.losses, ["Write has no writer for .doc, so it cannot keep the file in its older format"]);
+            assert!(a.host_export("Plan.doc", true).is_err(), "there is no writer for the original format");
+            assert_eq!(export_state(&a), before, "an export changes nothing");
+            assert!(a.session.dirty && got.borrow().is_empty());
+            a.execute("file.save", json!({})).unwrap();
+            assert_eq!(got.borrow().as_slice(), &[("Plan.docx".to_string(), export.bytes.clone())], "Save writes the twin's bytes");
+            // Saved, the window holds the twin; the host's file is still the .doc, and its export is still the twin.
+            a.run("text.insert", json!({"text": "More "})).unwrap();
+            let again = a.host_export("Plan.doc", false).unwrap();
+            assert_eq!((again.name.as_str(), again.losses.len()), ("Plan.docx", 1));
+            true
+        });
     }
 
     /// Saving a document the host page never sent is Save As, so the page doesn't overwrite a

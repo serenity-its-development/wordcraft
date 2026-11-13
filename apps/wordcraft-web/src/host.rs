@@ -13,6 +13,11 @@
 //!   makes a NEW version of the file through the compare-and-set and answers `craft:saved {session, versionId}` (the next
 //!   save's base) or `craft:refused {session, code, reason}`. Anything that is not the opened file under its own name (an
 //!   export, a Save As) goes as `saveAs: true`, a copy, never a new version of the opened file.
+//! - `craft:export {session, request, keep?}` (from the parent, for a window with no live session): the host asks for the
+//!   document's bytes as they stand (auto-save, save on close); answered on the next frame by `craft:save {…, saveAs: false,
+//!   checkpoint: request, losses?}` (`export.rs`, `WordApp::host_export`). Never a save of the person's: nothing is
+//!   committed or marked saved. An imported .doc is answered with its .docx twin and the loss said; `keep: "original"` for
+//!   it is not answered (there is no writer for it).
 //! - `craft:dirty {session, dirty}` (to the parent): unsaved changes appeared or went away.
 //! - `craft:failed {error}` (to the parent): the editor could not start.
 //! - `craft:crdt:*` both ways: the live editing channel ([`crate::collab`]).
@@ -73,6 +78,9 @@ struct Shared {
     events: VecDeque<Event>,
     /// Runs the host relayed, waiting for the document to be drawn.
     runs: VecDeque<HostRun>,
+    /// The host's asks for the document's bytes (`craft:export`): the request id, and whether the file's own format was asked
+    /// for (`keep: "original"`). Judged when heard, answered on the next frame.
+    exports: Vec<(u64, bool)>,
     /// How many `craft:saved` the host has sent: a version landed.
     saved: u64,
 }
@@ -263,6 +271,42 @@ impl Bridge {
             .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
     }
 
+    /// The export asks heard since the last frame: `(request, keep_original)`.
+    pub fn take_exports(&self) -> Vec<(u64, bool)> {
+        std::mem::take(&mut self.shared.borrow_mut().exports)
+    }
+
+    /// `craft:save {…, saveAs: false, checkpoint: request, losses?}` to the parent: the answer to its `craft:export`, in the
+    /// file `name` the bytes are (the opened file's own name, or an imported .doc's .docx twin). Never a save of the person's.
+    pub fn post_export(&self, name: &str, bytes: &[u8], request: u64, losses: &[String]) -> Result<(), String> {
+        let (session, base) = {
+            let s = self.shared.borrow();
+            (s.opened.session.clone(), s.opened.version_id.clone())
+        };
+        let buffer = js_sys::Uint8Array::from(bytes).buffer();
+        let mut fields: Vec<(&str, JsValue)> = vec![
+            ("type", "craft:save".into()),
+            ("session", session.as_str().into()),
+            ("name", name.into()),
+            ("mime", mime_of(name).into()),
+            ("baseVersionId", base.as_str().into()),
+            ("saveAs", false.into()),
+            ("checkpoint", JsValue::from_f64(request as f64)),
+            ("bytes", buffer.clone().into()),
+        ];
+        if !losses.is_empty() {
+            let list = js_sys::Array::new();
+            for loss in losses {
+                list.push(&JsValue::from_str(loss));
+            }
+            fields.push(("losses", list.into()));
+        }
+        let message = message(&fields).ok_or_else(|| "couldn't build the message".to_string())?;
+        self.parent
+            .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
+            .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
+    }
+
     /// Hear the host.
     fn listen(&self, inbox: Inbox, ctx: egui::Context) {
         let bridge = self.clone();
@@ -289,6 +333,8 @@ impl Bridge {
                         let mut s = bridge.shared.borrow_mut();
                         s.opened = opened.clone();
                         s.events.push_back(Event::Opened(opened));
+                        // An ask not yet answered was for the open this one replaces.
+                        s.exports.clear();
                     }
                     inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes));
                     crate::handoff::wasm::note_open();
@@ -312,6 +358,20 @@ impl Bridge {
                     let code = string(&data, "code").unwrap_or_default();
                     let reason = string(&data, "reason").unwrap_or_else(|| "refused".into());
                     bridge.shared.borrow_mut().events.push_back(Event::Refused { code, reason });
+                }
+                // The host asks for the bytes as they stand (auto-save, save on close): answered on the next frame (`export.rs`).
+                "craft:export" => {
+                    let asked = string(&data, "session").unwrap_or_default();
+                    let request = js_sys::Reflect::get(&data, &JsValue::from_str("request")).ok().and_then(|v| v.as_f64());
+                    let keep_original = string(&data, "keep").as_deref() == Some("original");
+                    let judged = {
+                        let s = bridge.shared.borrow();
+                        crate::export::judge(&s.opened.session, s.opened.read_only, &asked, request)
+                    };
+                    match judged {
+                        Ok(request) => bridge.shared.borrow_mut().exports.push((request, keep_original)),
+                        Err(why) => log::warn!("Write: an export ask was not taken: {why:?}"),
+                    }
                 }
                 "craft:command" => {
                     let session = string(&data, "session").unwrap_or_default();
